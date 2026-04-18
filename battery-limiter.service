@@ -1,0 +1,18 @@
+[Unit]
+Description=Battery charge limiter (40%%-80%%)
+After=multi-user.target
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/default/battery-limiter
+Environment=STOP_CURRENT_MAX=4800000
+ExecStart=/usr/local/bin/battery-limiter.sh
+# Return full driver control on stop so phone doesn't stay limited
+ExecStopPost=/bin/sh -c 'path="${CHARGER_CURRENT_MAX_PATH:-${SYS_CMAX:-}}"; if [ -z "$path" ]; then for candidate in /sys/class/power_supply/*/current_max; do [ -e "$candidate" ] || continue; path="$candidate"; break; done; fi; [ -n "$path" ] && echo "${STOP_CURRENT_MAX:-4800000}" > "$path" || true'
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
