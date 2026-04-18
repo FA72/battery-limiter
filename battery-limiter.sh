@@ -41,7 +41,7 @@ STATE="monitor"
 TEMP_LOCK=0
 
 # ===================================================================
-# Logging (spec §12)
+# Logging
 # ===================================================================
 # Format: TIMESTAMP LEVEL [STATE] CONTEXT: message key=value ...
 
@@ -236,7 +236,7 @@ do_charge_recovery() {
 }
 
 # ===================================================================
-# charge_tuning (spec §6.4)
+# charge_tuning
 # Start at 500mA, if Charging lost raise by 100mA up to 1A.
 # If 1A fails, write CURRENT_DRIVER and return.
 # ===================================================================
@@ -283,7 +283,7 @@ do_charge_tuning() {
 }
 
 # ===================================================================
-# pause_recovery (spec §7.2)
+# pause_recovery
 # Infinite loop: write 0 every 10s until bq=Discharging.
 # ===================================================================
 do_pause_recovery() {
@@ -367,8 +367,8 @@ log_info "config: SYS_CAP=${SYS_CAP} SYS_TEMP=${SYS_TEMP} SYS_BQST=${SYS_BQST} S
 log_info "config: SYS_CMAX=${SYS_CMAX}"
 
 # ===================================================================
-# Main tick loop (spec §5)
-# First tick runs immediately at startup (spec §10).
+# Main tick loop
+# First tick runs immediately at startup.
 # ===================================================================
 FIRST_TICK=1
 
