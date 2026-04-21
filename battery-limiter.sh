@@ -27,6 +27,11 @@ CURRENT_START="${CURRENT_START:-500000}"       # 500 mA
 CURRENT_STEP="${CURRENT_STEP:-100000}"         # 100 mA
 CURRENT_CEIL="${CURRENT_CEIL:-1000000}"        # 1 A
 CURRENT_DRIVER="${CURRENT_DRIVER:-4800000}"    # full driver control
+RECOVERY_OFF_DWELL="${RECOVERY_OFF_DWELL:-3}"  # off-time before a wake attempt
+RECOVERY_PRIME="${RECOVERY_PRIME:-$CURRENT_CEIL}"
+RECOVERY_PRIME_SETTLE="${RECOVERY_PRIME_SETTLE:-15}"
+RECOVERY_BOOST="${RECOVERY_BOOST:-$CURRENT_DRIVER}"
+RECOVERY_BOOST_SETTLE="${RECOVERY_BOOST_SETTLE:-12}"
 
 # --- Sysfs paths ---
 BATTERY_GAUGE_BASE_PATH="${BATTERY_GAUGE_BASE_PATH:-}"
@@ -185,12 +190,29 @@ log_tick() {
     log_info "tick: cap=${cap}% temp=$(fmt_temp "$temp") bq=${bqst} cur=${cur}uA temp_lock=${TEMP_LOCK}"
 }
 
+charge_recovery_probe() {
+    local cycle="$1" target="$2" settle="$3" stage="$4"
+
+    sleep "$settle"
+
+    local bqst
+    bqst=$(read_bqst) || return 2
+    if [ "$bqst" = "Charging" ]; then
+        log_info "charge_recovery: Charging detected after cycle ${cycle} at ${target}uA stage=${stage}"
+        return 0
+    fi
+
+    local cur
+    cur=$(read_cur 2>/dev/null) || cur="?"
+    log_warn "charge_recovery: bq=${bqst} cur=${cur}uA after cycle ${cycle} target=${target}uA stage=${stage}"
+    return 1
+}
+
 # ===================================================================
 # charge_recovery
-# Infinite loop: for each cycle, try a toggle-wake ladder
-#   0 -> 500mA -> 0 -> 600mA -> ... -> 1A -> 0 -> driver-control
-# until bq=Charging.  This avoids assuming the driver wakes only from
-# a repeated large current_max write.
+# Infinite loop: for each cycle, try a focused wake sequence first
+#   0 -> prime current (default 1A) -> 0 -> driver boost
+# and only then fall back to a portable ladder over lower limits.
 # ===================================================================
 do_charge_recovery() {
     local prev_state="$STATE"
@@ -201,24 +223,46 @@ do_charge_recovery() {
     while true; do
         cycle=$((cycle + 1))
 
-        local target="$CURRENT_START"
-        while true; do
-            write_cmax "$CURRENT_OFF" "charge_recovery cycle ${cycle} toggle-off before ${target}uA"
-            sleep 2
-            write_cmax "$target" "charge_recovery cycle ${cycle} toggle-on ${target}uA"
-            sleep "$RETRY_INTERVAL"
+        write_cmax "$CURRENT_OFF" "charge_recovery cycle ${cycle} prime off-dwell"
+        sleep "$RECOVERY_OFF_DWELL"
+        write_cmax "$RECOVERY_PRIME" "charge_recovery cycle ${cycle} prime ${RECOVERY_PRIME}uA"
+        if charge_recovery_probe "$cycle" "$RECOVERY_PRIME" "$RECOVERY_PRIME_SETTLE" "prime"; then
+            STATE="$prev_state"
+            return 0
+        fi
 
-            local bqst
-            bqst=$(read_bqst) || break
-            if [ "$bqst" = "Charging" ]; then
-                log_info "charge_recovery: Charging detected after cycle ${cycle} at ${target}uA"
+        if [ "$RECOVERY_BOOST" -ne "$RECOVERY_PRIME" ]; then
+            write_cmax "$CURRENT_OFF" "charge_recovery cycle ${cycle} boost off-dwell"
+            sleep "$RECOVERY_OFF_DWELL"
+            write_cmax "$RECOVERY_BOOST" "charge_recovery cycle ${cycle} boost ${RECOVERY_BOOST}uA"
+            if charge_recovery_probe "$cycle" "$RECOVERY_BOOST" "$RECOVERY_BOOST_SETTLE" "boost"; then
                 STATE="$prev_state"
                 return 0
             fi
+        fi
 
-            local cur
-            cur=$(read_cur 2>/dev/null) || cur="?"
-            log_warn "charge_recovery: bq=${bqst} cur=${cur}uA after cycle ${cycle} target=${target}uA -- continuing ladder"
+        local target="$CURRENT_START"
+        while true; do
+            if [ "$target" -eq "$RECOVERY_PRIME" ] || [ "$target" -eq "$RECOVERY_BOOST" ]; then
+                if [ "$target" -lt "$CURRENT_CEIL" ]; then
+                    target=$((target + CURRENT_STEP))
+                    continue
+                fi
+                if [ "$target" -ne "$CURRENT_DRIVER" ]; then
+                    target="$CURRENT_DRIVER"
+                    continue
+                fi
+                break
+            fi
+
+            write_cmax "$CURRENT_OFF" "charge_recovery cycle ${cycle} toggle-off before ${target}uA"
+            sleep "$RECOVERY_OFF_DWELL"
+            write_cmax "$target" "charge_recovery cycle ${cycle} toggle-on ${target}uA"
+
+            if charge_recovery_probe "$cycle" "$target" "$RETRY_INTERVAL" "fallback"; then
+                STATE="$prev_state"
+                return 0
+            fi
 
             if [ "$target" -lt "$CURRENT_CEIL" ]; then
                 target=$((target + CURRENT_STEP))
@@ -362,6 +406,7 @@ log_info "=== battery-limiter v11 starting ==="
 log_info "config: CAP_LOW=${CAP_LOW}% CAP_HIGH=${CAP_HIGH}% TEMP_LOCK_ENTER=$(fmt_temp $TEMP_LOCK_ENTER) TEMP_LOCK_EXIT=$(fmt_temp $TEMP_LOCK_EXIT)"
 log_info "config: TICK=${TICK_INTERVAL}s RETRY=${RETRY_INTERVAL}s TUNING_SETTLE=${TUNING_SETTLE}s"
 log_info "config: CURRENT_START=${CURRENT_START} CURRENT_STEP=${CURRENT_STEP} CURRENT_CEIL=${CURRENT_CEIL} CURRENT_DRIVER=${CURRENT_DRIVER}"
+log_info "config: RECOVERY_OFF_DWELL=${RECOVERY_OFF_DWELL}s RECOVERY_PRIME=${RECOVERY_PRIME} RECOVERY_PRIME_SETTLE=${RECOVERY_PRIME_SETTLE}s RECOVERY_BOOST=${RECOVERY_BOOST} RECOVERY_BOOST_SETTLE=${RECOVERY_BOOST_SETTLE}s"
 log_info "config: BATTERY_GAUGE_BASE_PATH=${BATTERY_GAUGE_BASE_PATH}"
 log_info "config: SYS_CAP=${SYS_CAP} SYS_TEMP=${SYS_TEMP} SYS_BQST=${SYS_BQST} SYS_CUR=${SYS_CUR}"
 log_info "config: SYS_CMAX=${SYS_CMAX}"
