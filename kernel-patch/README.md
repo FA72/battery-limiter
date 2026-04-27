@@ -12,16 +12,6 @@ the `qcom_pmi8998_charger` driver.
    Long low-current charging sessions can latch the charger into
    `Not charging` until a fresh `CHARGING_ENABLE_CMD` edge is generated.
 
-The public repo intentionally keeps only the final deployment set:
-
-- `dkms/` with the patched driver source
-- `install_dkms.sh`
-- `uninstall_dkms.sh`
-- `verify_after_reboot.sh`
-
-Temporary diagnostics, one-off manual install helpers, and mail-ready upstream
-patch files are intentionally not included here.
-
 ## Install
 
 From Windows:
@@ -106,16 +96,6 @@ image hook so the stock module becomes active again after reboot.
 2. Защёлка safety-таймера PMI8998 (`SFT_EXPIRE`).
    При длинной зарядке малым током драйвер мог залипнуть в `Not charging`,
    пока не будет сгенерирован новый `CHARGING_ENABLE_CMD` edge.
-
-В публичной репе оставлен только финальный набор:
-
-- `dkms/` с исходником патченного драйвера
-- `install_dkms.sh`
-- `uninstall_dkms.sh`
-- `verify_after_reboot.sh`
-
-Диагностические скрипты, одноразовые helper'ы для ручной установки и файлы для
-upstream-рассылки патчей сюда специально не включены.
 
 ### Установка
 
