@@ -1,0 +1,5 @@
+battery-limiter.env
+tmp-*.sh
+kernel-patch/*.patch
+kernel-patch/*.orig
+kernel-patch/*.rej

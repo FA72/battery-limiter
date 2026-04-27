@@ -32,6 +32,14 @@ RECOVERY_PRIME="${RECOVERY_PRIME:-$CURRENT_CEIL}"
 RECOVERY_PRIME_SETTLE="${RECOVERY_PRIME_SETTLE:-15}"
 RECOVERY_BOOST="${RECOVERY_BOOST:-$CURRENT_DRIVER}"
 RECOVERY_BOOST_SETTLE="${RECOVERY_BOOST_SETTLE:-12}"
+# Escalation when the ladder cannot wake the charger IC.
+# Cycle 1 is plain (just the ladder); starting at cycle ESCALATE_REBIND_AT we
+# escalate to a charger-driver rebind. Rebinding is safe and reliable on
+# kernels with the DKMS charger fix installed; see kernel-patch/README.md for
+# the public install notes for sdm845 / PMI8998.
+REBIND_OFF_DWELL="${REBIND_OFF_DWELL:-3}"          # pause between unbind and bind
+REBIND_SETTLE="${REBIND_SETTLE:-15}"               # max wait for current_max to reappear
+ESCALATE_REBIND_AT="${ESCALATE_REBIND_AT:-2}"      # cycle at which to start driver rebind kicks
 
 # --- Sysfs paths ---
 BATTERY_GAUGE_BASE_PATH="${BATTERY_GAUGE_BASE_PATH:-}"
@@ -125,6 +133,43 @@ resolve_current_max_path() {
     return 0
 }
 
+# Resolve the charger's underlying device + driver paths so we can unbind/rebind
+# when the IC gets stuck. Populates CHARGER_PS_DIR, CHARGER_DEVICE_PATH,
+# CHARGER_DRIVER_PATH, CHARGER_DEVICE_NAME from SYS_CMAX on every call so the
+# lookup survives a rebind (where the underlying symlinks are recreated).
+#
+# It also resolves the PARENT bus device (e.g. the SPMI PMIC that owns the
+# charger platform device). On some kernels (notably qcom_pmi8998_charger on
+# sdm845) the platform driver's .remove() leaks the wake IRQ, so platform-level
+# rebind is stuck with -EEXIST forever. Rebinding the parent bus device
+# destroys and recreates the platform child cleanly and bypasses that bug.
+resolve_charger_driver_paths() {
+    [ -n "${SYS_CMAX:-}" ] || return 1
+    CHARGER_PS_DIR=$(dirname "$SYS_CMAX")
+    local dev_link="$CHARGER_PS_DIR/device"
+    local drv_link="$CHARGER_PS_DIR/device/driver"
+    [ -L "$dev_link" ] || return 1
+    [ -L "$drv_link" ] || return 1
+    CHARGER_DEVICE_PATH=$(readlink -f "$dev_link") || return 1
+    CHARGER_DRIVER_PATH=$(readlink -f "$drv_link") || return 1
+    CHARGER_DEVICE_NAME=$(basename "$CHARGER_DEVICE_PATH")
+
+    # Resolve the parent bus device (one level up in /sys/devices hierarchy).
+    # If that parent is itself bound to a driver, expose it as a fallback
+    # rebind target.
+    CHARGER_PARENT_DEVICE_PATH=""
+    CHARGER_PARENT_DRIVER_PATH=""
+    CHARGER_PARENT_DEVICE_NAME=""
+    local parent
+    parent=$(dirname "$CHARGER_DEVICE_PATH")
+    if [ -L "$parent/driver" ]; then
+        CHARGER_PARENT_DEVICE_PATH="$parent"
+        CHARGER_PARENT_DRIVER_PATH=$(readlink -f "$parent/driver") || CHARGER_PARENT_DRIVER_PATH=""
+        CHARGER_PARENT_DEVICE_NAME=$(basename "$parent")
+    fi
+    return 0
+}
+
 # ===================================================================
 # Sysfs read helpers
 # ===================================================================
@@ -190,6 +235,111 @@ log_tick() {
     log_info "tick: cap=${cap}% temp=$(fmt_temp "$temp") bq=${bqst} cur=${cur}uA temp_lock=${TEMP_LOCK}"
 }
 
+# ===================================================================
+# Driver-level wake primitive
+#
+# Used when the charger IC has latched into "Not charging" and no longer
+# reacts to current_max writes. Safe to call with the cable plugged in and
+# without rebooting, as long as the driver's wake-IRQ handling is correct
+# on unbind (see kernel-patch/README.md for the sdm845 / PMI8998 fix).
+# ===================================================================
+
+kick_via_driver_rebind() {
+    if ! resolve_charger_driver_paths; then
+        log_warn "kick_rebind: unable to resolve charger driver path from SYS_CMAX=${SYS_CMAX}"
+        return 1
+    fi
+
+    # Strategy: the platform driver may refuse to re-bind (on some kernels it
+    # leaks resources in .remove() and returns -EEXIST forever). So we prefer
+    # a parent-bus rebind when available: unbind the PARENT (e.g. the SPMI
+    # PMIC) which destroys the platform child cleanly, then re-bind the
+    # parent which re-creates the child and lets it probe from scratch.
+    # We fall back to platform-level rebind only if no parent is usable.
+    local did_any=1
+    local err
+
+    if [ -n "$CHARGER_PARENT_DRIVER_PATH" ] \
+       && [ -e "$CHARGER_PARENT_DRIVER_PATH/unbind" ] \
+       && [ -e "$CHARGER_PARENT_DRIVER_PATH/bind" ]; then
+        log_warn "kick_rebind: parent unbind device=${CHARGER_PARENT_DEVICE_NAME} driver=${CHARGER_PARENT_DRIVER_PATH}"
+        if echo "$CHARGER_PARENT_DEVICE_NAME" > "$CHARGER_PARENT_DRIVER_PATH/unbind" 2>/tmp/rebind_err; then
+            sleep "$REBIND_OFF_DWELL"
+            log_info "kick_rebind: parent bind device=${CHARGER_PARENT_DEVICE_NAME}"
+            if echo "$CHARGER_PARENT_DEVICE_NAME" > "$CHARGER_PARENT_DRIVER_PATH/bind" 2>/tmp/rebind_err; then
+                did_any=0
+            else
+                err=$(cat /tmp/rebind_err 2>/dev/null)
+                log_error "kick_rebind: parent bind failed err=${err}"
+            fi
+        else
+            err=$(cat /tmp/rebind_err 2>/dev/null)
+            log_warn "kick_rebind: parent unbind failed err=${err} -- falling back to platform rebind"
+        fi
+    fi
+
+    if [ "$did_any" -ne 0 ]; then
+        # Fall back to platform-level rebind.
+        local unbind="$CHARGER_DRIVER_PATH/unbind"
+        local bind="$CHARGER_DRIVER_PATH/bind"
+        local name="$CHARGER_DEVICE_NAME"
+
+        if [ ! -e "$unbind" ] || [ ! -e "$bind" ]; then
+            log_warn "kick_rebind: platform bind/unbind nodes missing (driver=${CHARGER_DRIVER_PATH})"
+        else
+            log_warn "kick_rebind: platform unbind device=${name} driver=${CHARGER_DRIVER_PATH}"
+            if echo "$name" > "$unbind" 2>/tmp/rebind_err; then
+                sleep "$REBIND_OFF_DWELL"
+                log_info "kick_rebind: platform bind device=${name}"
+                if echo "$name" > "$bind" 2>/tmp/rebind_err; then
+                    did_any=0
+                else
+                    err=$(cat /tmp/rebind_err 2>/dev/null)
+                    log_error "kick_rebind: platform bind failed err=${err} (driver may leak resources on remove)"
+                fi
+            else
+                err=$(cat /tmp/rebind_err 2>/dev/null)
+                log_error "kick_rebind: platform unbind failed err=${err}"
+            fi
+        fi
+    fi
+
+    # Wait for current_max to reappear. After a successful rebind the sysfs
+    # path is usually identical, but give the driver a chance to re-publish.
+    local waited=0
+    while [ ! -e "$SYS_CMAX" ] && [ "$waited" -lt "$REBIND_SETTLE" ]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if [ -e "$SYS_CMAX" ]; then
+        log_info "kick_rebind: current_max back after ${waited}s at ${SYS_CMAX}"
+    else
+        log_warn "kick_rebind: current_max missing after ${REBIND_SETTLE}s -- re-detecting"
+        SYS_CMAX=""
+        CHARGER_CURRENT_MAX_PATH=""
+        resolve_current_max_path || log_error "kick_rebind: re-detect failed"
+    fi
+
+    # Gauge node sometimes re-enumerates alongside the charger; refresh too.
+    resolve_battery_gauge_paths || true
+    return "$did_any"
+}
+
+# Escalation dispatcher. Called once per ladder cycle BEFORE the prime/boost
+# and ladder attempts. Cycle 1 is plain; starting at ESCALATE_REBIND_AT we
+# add a driver rebind so we don't nuke the driver on transient hiccups.
+charge_recovery_escalate() {
+    local cycle="$1"
+
+    if [ "$cycle" -ge "$ESCALATE_REBIND_AT" ]; then
+        log_warn "escalate: cycle ${cycle} >= ${ESCALATE_REBIND_AT} -- driver rebind"
+        kick_via_driver_rebind || true
+        return 0
+    fi
+
+    return 0
+}
+
 charge_recovery_probe() {
     local cycle="$1" target="$2" settle="$3" stage="$4"
 
@@ -222,6 +372,8 @@ do_charge_recovery() {
     local cycle=0
     while true; do
         cycle=$((cycle + 1))
+
+        charge_recovery_escalate "$cycle"
 
         write_cmax "$CURRENT_OFF" "charge_recovery cycle ${cycle} prime off-dwell"
         sleep "$RECOVERY_OFF_DWELL"
