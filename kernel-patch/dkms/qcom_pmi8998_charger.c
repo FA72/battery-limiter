@@ -69,8 +69,9 @@
  * current until a full unplug/replug or a 0->1 edge on
  * CHARGING_ENABLE_CMD. Userspace thermal / charge-limiting policies
  * that hold the device at a fixed SoC with a low ICL for days
- * routinely trip this latch. Disable both timers -- the upper layer
- * watchdog plus FG-driven termination handle runaway protection.
+ * can trip this latch. This override disables both hardware timers.
+ * Userspace temperature / SoC checks do not replace those protections;
+ * this is a device-specific policy change, not only a wake-IRQ fix.
  */
 #define CHGR_SAFETY_TIMER_ENABLE_CFG			0xA0
 #define FAST_CHARGE_SAFETY_TIMER_EN_BIT			BIT(1)

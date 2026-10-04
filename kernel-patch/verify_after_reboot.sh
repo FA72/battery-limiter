@@ -1,9 +1,24 @@
 #!/bin/bash
-# Post-install verification: confirm the patched module is loaded, then
-# exercise an unbind/bind on the SPMI parent and confirm the probe now
-# succeeds (no -EEXIST on dev_pm_set_wake_irq). Can be used after reboot
-# or after a manual rmmod/modprobe live-reload.
+# Read-only post-install verification by default. --exercise-rebind also
+# detaches / attaches the SPMI parent and therefore changes device state.
+# Do not use that option on an unverified kernel or without a recovery path.
 set -euo pipefail
+
+EXERCISE_REBIND=0
+case "${1:-}" in
+    "") ;;
+    --exercise-rebind) EXERCISE_REBIND=1 ;;
+    *) echo "Usage: $0 [--exercise-rebind]" >&2; exit 1 ;;
+esac
+if [ "$#" -gt 1 ]; then
+    echo "Usage: $0 [--exercise-rebind]" >&2
+    exit 1
+fi
+
+echo "=== running kernel / installed module ==="
+uname -r
+# modinfo resolves the installed file; it does not prove that file is loaded.
+modinfo -n qcom_pmi8998_charger
 
 echo "=== module loaded? ==="
 lsmod | grep qcom_pmi8998_charger || { echo "module not loaded"; exit 2; }
@@ -22,6 +37,14 @@ echo "=== charger power_supply present? ==="
 test -d /sys/class/power_supply/pmi8998-charger
 ls /sys/class/power_supply/pmi8998-charger/{status,online,current_max} >/dev/null
 echo OK
+
+if [ "$EXERCISE_REBIND" -eq 0 ]; then
+    echo
+    echo "=== state (read-only; no rebind performed) ==="
+    cat /sys/class/power_supply/pmi8998-charger/{status,online,current_max}
+    echo "Rebind test requires the explicit --exercise-rebind option."
+    exit 0
+fi
 
 echo
 echo "=== exercise parent SPMI unbind / bind ==="

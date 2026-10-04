@@ -1,137 +1,81 @@
 # Battery Limiter
 
-## English
-
-Ready-to-publish package for Linux devices with `systemd` that expose:
-- a reliable battery gauge with `capacity`, `temp`, `status`, `current_now`;
-- a writable charger driver node `current_max`.
-
-The package auto-detects the first power_supply node that exposes `capacity`, `temp`, `status`, and `current_now` together unless you override these paths explicitly.
-The package auto-detects the first available `/sys/class/power_supply/*/current_max` node unless you override it explicitly.
-
-The limiter keeps the battery in the 40%-80% range and uses a simple state machine:
-- `monitor` reads state without touching `current_max` while the battery stays in range;
-- `charge_recovery` first tries a focused wake-up `0 -> prime current -> driver boost`, then falls back to a portable ladder if needed;
-- `charge_tuning` finds the lowest limit that still keeps `Charging`;
-- `pause_recovery` forces `Discharging` by writing `0`;
-- `temp_lock` blocks charging while the device is too hot.
-
-### Package contents
-
-- `battery-limiter.sh` — main limiter script.
-- `battery-limiter.service` — `systemd` unit.
-- `journald-battery-limiter.conf` — persistent journal retention config.
-- `setup_battery_limiter.ps1` — deployment script over SSH.
-- `battery-limiter.env.example` — example override file for device-specific settings.
-
-### Deployment
-
-1. If needed, copy `battery-limiter.env.example` to `battery-limiter.env` and adjust the values for your device.
-2. Open PowerShell in this directory.
-3. Run the deployment script with explicit SSH parameters:
-
-```powershell
-.\setup_battery_limiter.ps1 `
-  -SshHost your-device-ip `
-  -SshUser your-user `
-  -SshKey "$env:USERPROFILE\.ssh\your_private_key"
-```
-
-You can also provide the same values via environment variables:
-- `BATTERY_LIMITER_SSH_HOST`
-- `BATTERY_LIMITER_SSH_USER`
-- `BATTERY_LIMITER_SSH_KEY`
-
-The deployment script:
-- uploads `battery-limiter.sh` to `/usr/local/bin/`;
-- uploads `battery-limiter.service` to `/etc/systemd/system/`;
-- uploads `journald-battery-limiter.conf` to `/etc/systemd/journald.conf.d/`;
-- optionally uploads `battery-limiter.env` to `/etc/default/battery-limiter`;
-- runs `daemon-reload`, restarts `systemd-journald`, enables and restarts the service.
-
-### Verification
-
-```bash
-systemctl status battery-limiter.service
-journalctl -u battery-limiter.service -f
-cat /sys/class/power_supply/<battery-node>/status
-cat /sys/class/power_supply/<battery-node>/current_now
-find /sys/class/power_supply -name capacity
-find /sys/class/power_supply -name current_max
-```
-
-### What may differ on other devices
-
-1. Sysfs paths. Another phone will likely use different battery and charger nodes. The script auto-detects the first battery gauge node that exposes `capacity`, `temp`, `status`, and `current_now` together, and also auto-detects the first available `current_max` node. If that is not enough, override `BATTERY_GAUGE_BASE_PATH`, `SYS_CAP`, `SYS_TEMP`, `SYS_BQST`, `SYS_CUR`, `SYS_CMAX`, and `CHARGER_CURRENT_MAX_PATH` in `battery-limiter.env`.
-2. Driver maximum current. `CURRENT_DRIVER` is still device-specific. `RECOVERY_BOOST` and `STOP_CURRENT_MAX` default to `CURRENT_DRIVER`, but can be overridden separately if your charger behaves differently during recovery or on service stop. The example value `4800000` is valid for one specific charger driver; another device may require a different ceiling.
-3. Thresholds and timings. `CAP_LOW`, `CAP_HIGH`, thermal thresholds, retry timings, and the recovery knobs (`RECOVERY_OFF_DWELL`, `RECOVERY_PRIME`, `RECOVERY_PRIME_SETTLE`, `RECOVERY_BOOST`, `RECOVERY_BOOST_SETTLE`) may need adjustment.
-4. Charging model. This package assumes charging can be influenced through `current_max`. If your driver uses another control model, adapt the script logic, not only the paths.
-5. Init system. The package is built for `systemd`. Other init systems will require a different service wrapper.
-
-### Notes
-
-- The script waits for required sysfs nodes instead of failing immediately.
-- `ExecStopPost` returns charger control to the driver when the service stops.
-
-### Optional: kernel patch for sdm845 / PMI8998
-
-On OnePlus 6 (Mobian, `linux-image-6.12-sdm845`) the in-tree
-`qcom_pmi8998_charger` driver leaks its wake-IRQ on unbind, so the
-charger IC cannot be re-probed from userspace after it latches into
-`Not charging`. Long low-current charging sessions can also trip the
-PMI8998 safety timer and latch `SFT_EXPIRE`, which again leaves the
-device stuck until the driver is fully re-initialized. The
-[`kernel-patch/`](kernel-patch/) directory ships a ready-to-install
-DKMS override that fixes both problems and survives kernel upgrades.
-
-Quick install (from this directory):
-
-```powershell
-scp -r .\kernel-patch oneplus6-admin:~/kpatch
-ssh oneplus6-admin 'sudo bash ~/kpatch/install_dkms.sh'
-ssh oneplus6-admin 'sudo systemctl reboot'
-# wait ~60 s, then:
-ssh oneplus6-admin 'bash ~/kpatch/verify_after_reboot.sh'
-```
-
-There is also an optional no-reboot activation path via
-`rmmod qcom_pmi8998_charger ; modprobe qcom_pmi8998_charger`.
-Public usage notes, verification steps, and uninstall instructions are
-in [`kernel-patch/README.md`](kernel-patch/README.md). The patch is
-optional — without it `charge_recovery` still falls back to the
-capacity-based ladder, but a hardware latch may still need a reboot.
-
----
-
 ## Русский
 
-Готовый пакет для Linux-устройств с `systemd`, у которых есть:
-- надёжный battery gauge с `capacity`, `temp`, `status`, `current_now`;
-- writable-узел зарядного драйвера `current_max`.
+Управление зарядкой OnePlus 6 с Mobian, который работает как домашний сервер.
+Скрипт запускается через `systemd`, читает состояние батареи из Linux sysfs и
+задаёт лимит входного тока зарядного контроллера через `current_max`. Приложение
+для мониторинга — отдельный [MobianWebMonitor](https://github.com/FA72/MobianWebMonitor).
 
-Пакет автоматически находит первый power_supply node, в котором одновременно есть `capacity`, `temp`, `status` и `current_now`, если эти пути не заданы явно.
-Пакет автоматически находит первый доступный узел `/sys/class/power_supply/*/current_max`, если путь не задан явно через override.
+Это код для конкретного эксперимента, а не универсальная система защиты
+аккумулятора. На другом устройстве нужно проверить драйвер, единицы измерения,
+действие записи `0` и допустимые значения тока. Ограничение заряда и проверка
+температуры не гарантируют безопасность батареи.
 
-Пакет удерживает заряд в диапазоне 40%-80% и использует простую state machine:
-- `monitor` наблюдает за состоянием и не пишет в `current_max`, пока заряд в диапазоне;
-- `charge_recovery` сначала делает focused wake-up `0 -> prime current -> driver boost`, а потом при необходимости переходит к fallback-лестнице;
-- `charge_tuning` подбирает минимальный лимит, который удерживает `Charging`;
-- `pause_recovery` принудительно переводит устройство в `Discharging` записью `0`;
-- `temp_lock` запрещает зарядку при перегреве.
+### Как это работает
 
-### Состав пакета
+Состояния публичной версии скрипта:
 
-- `battery-limiter.sh` — основной скрипт лимитера.
-- `battery-limiter.service` — unit для `systemd`.
-- `journald-battery-limiter.conf` — конфигурация хранения логов в persistent journal.
-- `setup_battery_limiter.ps1` — скрипт деплоя по SSH.
-- `battery-limiter.env.example` — пример override-файла для параметров конкретного устройства.
+- `monitor` — читает заряд, температуру, статус и ток каждые 5 минут;
+- `charge_recovery` — при заряде ниже `CAP_LOW` пытается восстановить `Charging`
+  последовательностью `0 -> RECOVERY_PRIME -> 0 -> RECOVERY_BOOST`, затем
+  перебирает ступени лимита тока;
+- `charge_tuning` — начинает с 0,5 А, ждёт стабилизации статуса и при необходимости
+  повышает лимит на 0,1 А до 1 А; если этого недостаточно, задаёт `CURRENT_DRIVER`;
+- `pause_recovery` — при заряде выше `CAP_HIGH` пишет `0` до появления
+  `Discharging`;
+- `temp_lock` — при 45 °C блокирует зарядку и снимается после охлаждения ниже
+  40 °C. Эта проверка выполняется в основном цикле, а не отдельным watchdog.
 
-### Деплой
+Диапазон по умолчанию — 40–80 %. При ровно 40 или 80 % срабатывает правило
+«в диапазоне», поскольку условия в коде — строго ниже и строго выше порога.
+Значение `current_max` — лимит входного тока, а не измеренный ток в аккумуляторе:
+часть питания потребляет само устройство. Значение `4800000` относится к
+конкретному драйверу и не означает постоянную зарядку батареи током 4,8 А.
 
-1. При необходимости скопируйте `battery-limiter.env.example` в `battery-limiter.env` и измените значения под своё устройство.
-2. Откройте PowerShell в этой папке.
-3. Запустите deploy-скрипт с явными SSH-параметрами:
+### Почему начальный ток теперь 0,6 А
+
+Фиксированного лимита 0,5 А стало не хватать после роста нагрузки контейнеров:
+статус переключался между `Charging` и `Discharging`. 10 августа 2026 года
+в профиле OnePlus 6 начальный лимит подняли до 0,6 А. Проверка работающего
+сервера 4 октября 2026 года подтвердила `CURRENT_START=600000`. Это значение
+сохранено в `battery-limiter.env.example`; без override скрипт по-прежнему
+начинает с 0,5 А.
+Дальше `charge_tuning` проверяет статус и при необходимости повышает лимит
+ступенями до 1 А. Если статус `Charging` удалось удержать, дальнейшего повышения
+в этом цикле не происходит.
+
+Подстройка выполняется в сценарии низкого заряда. Внутри диапазона `monitor`
+не меняет лимит: это подбор по фактическому статусу при запуске зарядки, а не
+непрерывное измерение мощности нагрузки. Пример воспроизводит настройку
+конкретного устройства; он не является выгрузкой текущих параметров сервера.
+
+При неудачных циклах recovery скрипт также может перепривязать драйвер, причём
+предпочитает родительское устройство SPMI. Это меняет состояние PMIC и может
+затронуть его дочерние устройства. Для OnePlus 6 связанную доработку драйвера
+и её ограничения см. в [kernel-patch/README.md](kernel-patch/README.md).
+
+### Файлы
+
+| Файл | Назначение |
+| --- | --- |
+| `battery-limiter.sh` | Логика лимитера |
+| `battery-limiter.service` | Unit `systemd` |
+| `battery-limiter.env.example` | Пример параметров без данных конкретного сервера |
+| `setup_battery_limiter.ps1` | Установка через SSH из PowerShell |
+| `journald-battery-limiter.conf` | Настройки постоянного системного журнала |
+| `kernel-patch/` | DKMS override для `qcom_pmi8998_charger` |
+
+Рабочий `battery-limiter.env` исключён из Git. SSH-ключи в репозиторий не входят.
+
+### Настройка и установка
+
+1. Скопируйте `battery-limiter.env.example` в `battery-limiter.env` и настройте
+   параметры своего устройства.
+2. Если power_supply-узлов несколько, задайте пути явно. Автопоиск выбирает
+   первый узел с `capacity`, `temp`, `status`, `current_now` и первый
+   `current_max`; это не проверка того, что выбраны нужные датчик и контроллер.
+3. Из каталога репозитория запустите:
 
 ```powershell
 .\setup_battery_limiter.ps1 `
@@ -140,67 +84,81 @@ capacity-based ladder, but a hardware latch may still need a reboot.
   -SshKey "$env:USERPROFILE\.ssh\your_private_key"
 ```
 
-Те же значения можно передать через переменные окружения:
-- `BATTERY_LIMITER_SSH_HOST`
-- `BATTERY_LIMITER_SSH_USER`
-- `BATTERY_LIMITER_SSH_KEY`
+Вместо аргументов можно задать `BATTERY_LIMITER_SSH_HOST`,
+`BATTERY_LIMITER_SSH_USER`, `BATTERY_LIMITER_SSH_KEY`.
 
-Скрипт деплоя:
-- копирует `battery-limiter.sh` в `/usr/local/bin/`;
-- копирует `battery-limiter.service` в `/etc/systemd/system/`;
-- копирует `journald-battery-limiter.conf` в `/etc/systemd/journald.conf.d/`;
-- при наличии копирует `battery-limiter.env` в `/etc/default/battery-limiter`;
-- выполняет `daemon-reload`, перезапускает `systemd-journald`, включает и перезапускает сервис.
+Скрипт копирует лимитер в `/usr/local/bin/`, unit в `/etc/systemd/system/`,
+настройки журнала в `/etc/systemd/journald.conf.d/`, а рабочий файл параметров,
+если он есть, — в `/etc/default/battery-limiter`. Затем выполняет
+`daemon-reload`, перезапускает `systemd-journald`, включает и перезапускает
+лимитер. Это установка с изменением системы, а не диагностическая команда.
+Патч ядра этим скриптом не устанавливается.
 
-### Проверка после деплоя
+При остановке сервиса `ExecStopPost` записывает `STOP_CURRENT_MAX`
+(по умолчанию `CURRENT_DRIVER`) и снимает установленное сервисом ограничение.
+Остановка сервиса поэтому не означает отключение зарядки.
+
+### Проверка без изменения зарядки
 
 ```bash
-systemctl status battery-limiter.service
-journalctl -u battery-limiter.service -f
-cat /sys/class/power_supply/<battery-node>/status
-cat /sys/class/power_supply/<battery-node>/current_now
-find /sys/class/power_supply -name capacity
-find /sys/class/power_supply -name current_max
+systemctl status battery-limiter.service --no-pager
+journalctl -u battery-limiter.service -n 60 --no-pager
+cat /sys/class/power_supply/<battery-node>/{capacity,temp,status,current_now}
+cat /sys/class/power_supply/<charger-node>/current_max
 ```
 
-### Что может отличаться на других устройствах
+В логах есть состояния, причины изменения лимита и показания датчиков.
+Температура sysfs указана в десятых долях градуса, ток — в микроамперах;
+проверьте эти единицы для своего драйвера.
 
-1. Sysfs-пути. На другом телефоне почти наверняка будут другие battery и charger nodes. Скрипт сам пытается найти первый battery gauge node, где одновременно есть `capacity`, `temp`, `status` и `current_now`, а также первый доступный `current_max`. Если этого недостаточно, можно явно переопределить `BATTERY_GAUGE_BASE_PATH`, `SYS_CAP`, `SYS_TEMP`, `SYS_BQST`, `SYS_CUR`, `SYS_CMAX` и `CHARGER_CURRENT_MAX_PATH` через `battery-limiter.env`.
-2. Максимальный ток драйвера. `CURRENT_DRIVER` всё ещё зависит от конкретного устройства. `RECOVERY_BOOST` и `STOP_CURRENT_MAX` по умолчанию берутся из `CURRENT_DRIVER`, но при необходимости их можно переопределить отдельно, если железо ведёт себя по-разному во время recovery или при остановке сервиса. Пример `4800000` подходит для одного конкретного драйвера; на другом железе верхняя граница может быть другой.
-3. Пороговые значения и интервалы. `CAP_LOW`, `CAP_HIGH`, температурные пороги, тайминги ретраев и recovery-параметры (`RECOVERY_OFF_DWELL`, `RECOVERY_PRIME`, `RECOVERY_PRIME_SETTLE`, `RECOVERY_BOOST`, `RECOVERY_BOOST_SETTLE`) могут потребовать подстройки.
-4. Модель управления зарядкой. Пакет рассчитан на драйвер, которым можно управлять через `current_max`. Если у драйвера другая модель управления, адаптировать нужно логику скрипта, а не только пути.
-5. Init-система. Пакет ориентирован на `systemd`. Для других init-систем нужен другой service wrapper.
+Для локальной проверки синтаксиса без запуска лимитера:
 
-### Практические замечания
-
-- Скрипт ждёт появления нужных sysfs-узлов при старте, а не падает сразу.
-- `ExecStopPost` возвращает управление зарядкой драйверу при остановке сервиса.
-
-### Опционально: патч ядра для sdm845 / PMI8998
-
-На OnePlus 6 (Mobian, `linux-image-6.12-sdm845`) штатный драйвер
-`qcom_pmi8998_charger` течёт wake-IRQ при unbind, поэтому charger IC
-нельзя перезапустить из userspace после залипания в `Not charging` —
-помогает только ребут или физическое переподключение кабеля. Кроме
-этого, при длинных сессиях зарядки малым током у PMI8998 может
-срабатывать safety-таймер и защёлкиваться `SFT_EXPIRE`, после чего
-заряд снова не восстанавливается без полной переинициализации драйвера.
-В [`kernel-patch/`](kernel-patch/) лежит готовый DKMS-override,
-который чинит обе проблемы и переживает апгрейды ядра.
-
-Быстрый install (из этой папки):
-
-```powershell
-scp -r .\kernel-patch oneplus6-admin:~/kpatch
-ssh oneplus6-admin 'sudo bash ~/kpatch/install_dkms.sh'
-ssh oneplus6-admin 'sudo systemctl reboot'
-# подождать ~60 сек, затем:
-ssh oneplus6-admin 'bash ~/kpatch/verify_after_reboot.sh'
+```bash
+bash -n battery-limiter.sh
+bash -n kernel-patch/install_dkms.sh
+bash -n kernel-patch/uninstall_dkms.sh
+bash -n kernel-patch/verify_after_reboot.sh
+bash tests/smoke.sh
 ```
 
-Есть и необязательный вариант без ребута через
-`rmmod qcom_pmi8998_charger ; modprobe qcom_pmi8998_charger`.
-Публичная инструкция, проверка и откат описаны в
-[`kernel-patch/README.md`](kernel-patch/README.md). Патч не обязателен:
-без него эскалация `charge_recovery` всё ещё работает через capacity-
-based ladder, но аппаратное залипание может всё равно требовать ребут.
+`kernel-patch/verify_after_reboot.sh` по умолчанию только читает состояние.
+Тест реального `unbind/bind` требует явного `--exercise-rebind`.
+`tests/smoke.sh` запускает настоящий лимитер на обычных временных файлах:
+проверяет повышение недостаточного лимита 0,6 А до 0,7 А, остановку по верхнему
+порогу и температуре, а также поведение на границах диапазона. Отдельные
+mock-команды проверяют, что обычная проверка ядра не пытается писать в sysfs.
+
+## English
+
+A device-specific battery charge limiter for a OnePlus 6 running Mobian as a
+home server. A `systemd` service reads Linux power_supply sysfs and changes the
+charger's input-current limit through `current_max`. SoC and temperature checks
+are not a universal battery safety guarantee.
+
+The public script defaults to a 40–80% range, observes every five minutes,
+recovers charging below 40%, tunes the input-current limit from 0.5 A to 1 A,
+and pauses above 80%. The supplied OnePlus 6 profile starts at 0.6 A instead
+of the script's 0.5 A default: the lower limit was insufficient under the
+author's container workload and caused `Charging/Discharging` oscillation.
+Read-only verification of the running server on 4 October 2026 confirmed
+`CURRENT_START=600000`. The profile remains a reproducible example, not an
+export of all current server settings.
+A 45 °C temperature lock clears below 40 °C. Boundaries
+are strict: exactly 40% and 80% remain in range. Tuning is part of the low-SoC
+workflow; the in-range monitor does not continuously adapt current to workload.
+`current_max` is an input-current limit, not measured battery charging current.
+
+Copy `battery-limiter.env.example` to the Git-ignored `battery-limiter.env`,
+check paths and driver-specific current values, then run
+`setup_battery_limiter.ps1` with explicit host, user and SSH key parameters as
+shown above. The installer changes the system, restarts journald and the
+limiter, and does not install the optional kernel override. Stopping the service
+restores `STOP_CURRENT_MAX` / `CURRENT_DRIVER`; it does not switch charging off.
+
+Auto-detection chooses the first matching battery gauge and the first
+`current_max` node. Override paths on devices with multiple supplies. Recovery
+may rebind the charger or its SPMI parent, which can affect related devices.
+Read [kernel-patch/README.md](kernel-patch/README.md) before considering the
+PMI8998 override: version 1.1 also disables two hardware charge safety timers.
+The kernel verification helper is read-only by default; the explicit
+`--exercise-rebind` option changes hardware state.

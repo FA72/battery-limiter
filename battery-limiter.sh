@@ -7,7 +7,8 @@
 #   charge_tuning    -- find minimum current_max that sustains Charging
 #   pause_recovery   -- infinite loop: write 0 every 10s until Discharging
 #
-# temp_lock flag blocks all charging scenarios until temp < 40.0C.
+# The main tick evaluates temp_lock and blocks charge workflows until <40.0C.
+# Recovery / tuning loops do not run a separate temperature watchdog.
 #
 # Sensing: one battery gauge node (capacity, temp, status, current_now).
 # Control: one charger current_max node.
@@ -34,9 +35,9 @@ RECOVERY_BOOST="${RECOVERY_BOOST:-$CURRENT_DRIVER}"
 RECOVERY_BOOST_SETTLE="${RECOVERY_BOOST_SETTLE:-12}"
 # Escalation when the ladder cannot wake the charger IC.
 # Cycle 1 is plain (just the ladder); starting at cycle ESCALATE_REBIND_AT we
-# escalate to a charger-driver rebind. Rebinding is safe and reliable on
-# kernels with the DKMS charger fix installed; see kernel-patch/README.md for
-# the public install notes for sdm845 / PMI8998.
+# escalate to a charger-driver rebind. This requires a verified driver;
+# detaching the parent PMIC can affect sibling devices. See
+# kernel-patch/README.md for the sdm845 / PMI8998 policy and limitations.
 REBIND_OFF_DWELL="${REBIND_OFF_DWELL:-3}"          # pause between unbind and bind
 REBIND_SETTLE="${REBIND_SETTLE:-15}"               # max wait for current_max to reappear
 ESCALATE_REBIND_AT="${ESCALATE_REBIND_AT:-2}"      # cycle at which to start driver rebind kicks
@@ -239,9 +240,9 @@ log_tick() {
 # Driver-level wake primitive
 #
 # Used when the charger IC has latched into "Not charging" and no longer
-# reacts to current_max writes. Safe to call with the cable plugged in and
-# without rebooting, as long as the driver's wake-IRQ handling is correct
-# on unbind (see kernel-patch/README.md for the sdm845 / PMI8998 fix).
+# reacts to current_max writes. Tested for a specific driver / device, not
+# a universal charger reset. Correct wake-IRQ cleanup is a prerequisite,
+# and parent-PMIC rebind can affect other devices (see kernel-patch/README.md).
 # ===================================================================
 
 kick_via_driver_rebind() {
